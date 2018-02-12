@@ -1,0 +1,207 @@
+<?php
+
+/**
+ * @file
+ * Module file for the mymodule module.
+ */
+
+use Drupal\Core\Render\BubbleableMetadata;
+use Drupal\image\Entity\ImageStyle;
+use Drupal\media_entity\Entity\Media;
+use Drupal\paragraphs\Entity\Paragraph;
+use Drupal\node\NodeInterface;
+use Drupal\taxonomy\Entity\Term;
+use Drupal\taxonomy\TermInterface;
+
+/**
+ * Implements hook_theme().
+ */
+function mymodule_theme() {
+  $path = drupal_get_path('module', 'mymodule');
+
+  // 3rd Level Menu Block.
+  $info['mymodule_third_level_menu'] = [
+    'variables' => [
+      'title' => NULL,
+      'menu' => NULL,
+    ],
+    'template' => 'mymodule-block-third-level-menu',
+    'path' => $path . '/theme',
+  ];
+
+  return $info;
+}
+
+/**
+ * Implements hook_token_info().
+ */
+function mymodule_token_info() {
+  $type = [
+    'name' => t('Nodes'),
+    'description' => t('Tokens related to individual nodes.'),
+    'needs-data' => 'node',
+  ];
+
+  $node['og_image'] = [
+    'name' => t('OG thumbnail image'),
+    'description' => t('Preloaded unified image taken from the appropriate node type.'),
+  ];
+
+  $node['content_type'] = [
+    'name' => t('Content type'),
+    'description' => t('Type of the current displayed node.'),
+  ];
+
+  return [
+    'types' => [
+      'node' => $type,
+    ],
+    'tokens' => [
+      'node' => $node,
+    ],
+  ];
+}
+
+/**
+ * Implements hook_tokens().
+ */
+function mymodule_tokens($type, $tokens, array $data, array $options, BubbleableMetadata $bubbleable_metadata) {
+  $replacements = [];
+  $og_image_url = FALSE;
+  $content_type = FALSE;
+
+  if ($type == 'node' && !empty($data['node'])) {
+    $node = $data['node'];
+    // OG Image implementation.
+    if ($node && ($node instanceof NodeInterface)) {
+      $get_media = function ($node) {
+        $og_image_url = '';
+        switch ($node->bundle()) {
+          case 'article':
+            // Media bundle.
+            $thumbnail_field = 'field_article_thumbnail_image';
+            // Paragraph bundle.
+            $media = 'field_article_image';
+            break;
+
+          case 'event':
+            // Media bundle.
+            $thumbnail_field = 'field_event_thumbnail_image';
+            // Paragraph bundle.
+            $media = 'field_event_media';
+            break;
+
+          case 'page':
+            // Media bundle.
+            $thumbnail_field = 'field_page_image';
+            break;
+
+          default:
+            // TODO: Provide default image.
+            $thumbnail_field = FALSE;
+            $media = FALSE;
+            break;
+        }
+        if ($thumbnail_field || $media) {
+          if (!$node->get($thumbnail_field)->isEmpty()) {
+            $media_id = $node->get($thumbnail_field)->getValue()[0]['target_id'];
+          }
+          else {
+            $node_paragraph = Paragraph::load($node->get($media)->getValue()[0]['target_id']);
+            $media_id = !($node_paragraph->get('field_media_image')->isEmpty()) ?
+             $node_paragraph->get('field_media_image')->getValue()[0]['target_id'] : FALSE;;
+          }
+          $media = $media_id ? MEDIA::load($media_id) : FALSE;
+          if ($media) {
+            $og_image = $media->get('field_image_bundle_image');
+            if ($referenced_entities = $og_image->referencedEntities()[0]) {
+              $uri = $referenced_entities->get('uri')->getValue()[0]['value'];
+              $og_image_url = file_create_url(ImageStyle::load('og_image')
+                ->buildUrl($uri));
+            }
+          }
+        }
+        return $og_image_url;
+      };
+      $og_image_url = $get_media($node);
+      // Content type implementation.
+      $content_type = $node->bundle();
+
+      foreach ($tokens as $name => $original) {
+        switch ($name) {
+          case 'og_image':
+            $replacements[$original] = '';
+            if ($og_image_url) {
+              $replacements[$original] = $og_image_url;
+            }
+            break;
+
+          case 'content_type':
+            $replacements[$original] = '';
+            if ($content_type) {
+              $replacements[$original] = $content_type;
+            }
+            break;
+        }
+      }
+
+    }
+    return $replacements;
+  }
+}
+
+/**
+ * Validate email.
+ *
+ * @param string $mail
+ *   The checked email.
+ *
+ * @return bool
+ *   Result of the check.
+ */
+function mymodule_validate_email($mail) {
+  return \Drupal::service('email.validator')->isValid($mail['#value']);
+}
+
+/**
+ * Helper function to determine the appropriate mailing lists from context.
+ *
+ * @return mixed|null
+ *   Return the mailchimp list or NULL on fail.
+ */
+function mymodule_get_mailchimp_lists() {
+  // Get the route match service.
+  $route_match = \Drupal::routeMatch();
+  // Get the current route name.
+  $route_name = $route_match->getRouteName();
+
+  $mailchimp_lists = NULL;
+  if (($node = $route_match->getParameter('node'))
+   && $node instanceof NodeInterface
+   && in_array($node->bundle(),
+     ['article', 'page', 'event', 'section', 'landing_page'])) {
+    if ($node->get('field_mailchimp_lists')->isEmpty()) {
+      // Get the mailchimp lists from the universe.
+      $universe = _p8z_profile_extend_get_universe();
+      $mailchimp_lists = $universe->get('field_mailchimp_lists')->getValue();
+    }
+    else {
+      // Get the mailchimp lists from the node.
+      $mailchimp_lists = $node->get('field_mailchimp_lists')->getValue();
+    }
+    return $mailchimp_lists;
+  }
+  elseif (($term = $route_match->getParameter('taxonomy_term')) && $term instanceof TermInterface && $term->bundle() == 'subsection') {
+    // We are on term section page, get the lists from the term.
+    $taxonomy_storage = \Drupal::entityTypeManager()->getStorage('taxonomy_term');
+    if ($parents = $taxonomy_storage->loadAllParents($term->id())) {
+      $term = array_pop($parents);
+    }
+    $mailchimp_lists = $term->get('field_mailchimp_lists')->getValue();
+    return $mailchimp_lists;
+  }
+  else {
+    return NULL;
+  }
+
+}

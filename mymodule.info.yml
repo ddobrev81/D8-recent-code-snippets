@@ -1,0 +1,6 @@
+name: 'mymodule'
+description: 'mymodule.'
+core: 8.x
+package: 'mymodule'
+
+type: module
